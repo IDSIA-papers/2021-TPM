@@ -20,9 +20,10 @@ import Base.Threads.@spawn
 #using Random, ParallelKMeans
 #using TikzPictures
 #TikzPictures.standaloneWorkaround(true)
-# n = num_examples(data)
 
-STRUDEL_ITERATIONS = 100 #/ 100
+STRUDEL_ITERATIONS1 = 50
+STRUDEL_ITERATIONS2 = 100
+STRUDEL_ITERATIONS3 = 500
 FAST = false
 LEARNVTREE = true
 VERBOSE = true
@@ -30,6 +31,7 @@ VERBOSE = true
 MIN_INT = 1
 MAX_INT = δINT + MIN_INT
 
+# DEBUG: remove mutable?
 @with_kw mutable struct mynode
     vtree::PlainVtree # = nothing
     db::DataFrame = DataFrame() # nothing #::DataFrame = DataFrame()
@@ -102,8 +104,9 @@ function expand_psdd(nd::mynode,active::Int64,titles::Vector{String},ncl::Int64,
     dl = nd.db[:,find_names(names(nd.db),l,titles)]
     dr = nd.db[:,find_names(names(nd.db),r,titles)]
     if typeof(nd.vtree.left) == PlainVtreeInnerNode # Many vars on the left
-        if clustering_can_be_done(nrow(unique(dl)),ncl,thr)
-            return expand_many_left_multiclusters(nd::mynode,active::Int64,dl,dr) #return n_c left and right clusters
+        if length(variables(nd.vtree.left)) <= 3 && nrow(unique(dl)) > 3#," xx ")
+        #if clustering_can_be_done(nrow(unique(dl)),ncl,thr)
+            return expand_many_left_multiclusters(nd::mynode,active::Int64,dl,dr,ncl) #return n_c left and right clusters
         else
             return expand_many_left_singlecluster(nd::mynode,active::Int64,dl,dr)
         end
@@ -129,32 +132,31 @@ function expand_psdd(nd::mynode,active::Int64,titles::Vector{String},ncl::Int64,
     end=#
 end
 
-function expand_many_left_multiclusters(nd::mynode,active::Int64,d_left::DataFrame,d_right::DataFrame)
-n_cl = 2
-elements = []
-indx_l = clustering4(d_left, n_cl) # do clustering
-for c = 1:n_cl
-    d_left_c = d_left[findall(x->x==c, indx_l),:]
-    rename!(d_left_c,names(d_left))
-    d_right_c = d_right[findall(x->x==c, indx_l),:]
-    p = count(i->(i==c),indx_l)/length(indx_l)
-    prime = mynode(vtree = nd.vtree.left, db = d_left_c, parent = active, position = "prime", theta = p)
-    if typeof(nd.vtree.right) == PlainVtreeInnerNode # Many variables on the right
-        sub = mynode( vtree = nd.vtree.right, db = d_right_c, parent = active, position = "sub")
-    else # Single variable on the right
-        var = Int64(variable(nd.vtree.right)) # variable as in the vtree
-        nt = count(i->(i == true), d_right_c[:,1]) # number of true states in the right db
-        if nt == size(d_right_c,1) || nt == 0
-            lit = nt == 0 ? -var : var
-            sub = mynode( vtree = nd.vtree.right, label = "L", visited = true, position = "sub", parent = active, literal = lit)
-        else
-            sub = mynode( vtree = nd.vtree.right, label = "T", visited = true, position = "sub", parent = active, literal = var, theta=nt/size(d_right_c,1))
+function expand_many_left_multiclusters(nd::mynode,active::Int64,d_left::DataFrame,d_right::DataFrame,n_cl::Int64)
+    elements = []
+    indx_l = clustering4(d_left, n_cl) # DEBUG: ass seed for randomness
+    for c = 1:n_cl
+        d_left_c = d_left[findall(x->x==c, indx_l),:]
+        rename!(d_left_c,names(d_left))
+        d_right_c = d_right[findall(x->x==c, indx_l),:]
+        p = count(i->(i==c),indx_l)/length(indx_l)
+        prime = mynode(vtree = nd.vtree.left, db = d_left_c, parent = active, position = "prime", theta = p)
+        if typeof(nd.vtree.right) == PlainVtreeInnerNode # Many variables on the right
+            sub = mynode( vtree = nd.vtree.right, db = d_right_c, parent = active, position = "sub")
+        else # Single variable on the right
+            var = Int64(variable(nd.vtree.right)) # variable as in the vtree
+            nt = count(i->(i == true), d_right_c[:,1]) # number of true states in the right db
+            if nt == size(d_right_c,1) || nt == 0
+                lit = nt == 0 ? -var : var
+                sub = mynode( vtree = nd.vtree.right, label = "L", visited = true, position = "sub", parent = active, literal = lit)
+            else
+                sub = mynode( vtree = nd.vtree.right, label = "T", visited = true, position = "sub", parent = active, literal = var, theta=nt/size(d_right_c,1))
+            end
         end
+        push!(elements,prime)
+        push!(elements,sub)
     end
-    push!(elements,prime)
-    push!(elements,sub)
-end
-return elements
+    return elements
 end
 
 function expand_many_left_singlecluster(nd::mynode,active::Int64,d_left::DataFrame,d_right::DataFrame)
@@ -242,7 +244,7 @@ function experiment(db_name::String,nc::Int64,thresh::Int64,test_size::Int64=-1)
     unique2 = size(unique(test_x),1)
     open("$db_name-$nc-$thresh-$test_size.results", "w") do myfile
     if VERBOSE
-        println("[$db_name][DB] n_c=$nc, threshold=$thresh, |X|=$n_features, STRUDEL_ITERATIONS=$STRUDEL_ITERATIONS, dim_train/test=$train_size($unique1)/$test_size($unique2)")
+        println("[$db_name][DB] n_c=$nc, threshold=$thresh, |X|=$n_features, STRUDEL_ITERATIONS=$STRUDEL_ITERATIONS1 $STRUDEL_ITERATIONS2 $STRUDEL_ITERATIONS3, dim_train/test=$train_size($unique1)/$test_size($unique2)")
     end
     write(myfile,"[$db_name][DB] n_c=$nc, threshold=$thresh, |X|=$n_features, dim_train/test=$train_size($unique1)/$test_size($unique2)\n")
     #@time
@@ -258,24 +260,30 @@ function experiment(db_name::String,nc::Int64,thresh::Int64,test_size::Int64=-1)
     end
     write(myfile,"[$db_name][Fully-Factorized] nodes/pars/models=$(num_nodes(pc_ff))/$(num_parameters(pc_ff))/$(log2(model_count(pc_ff)))\n")
     #@time
-    pc_st = learn_circuit(train_x; maxiter = STRUDEL_ITERATIONS, verbose = false)
+    pc_st1 = learn_circuit(train_x; maxiter = STRUDEL_ITERATIONS1, verbose = false)
+    pc_st2 = learn_circuit(train_x; maxiter = STRUDEL_ITERATIONS2, verbose = false)
+    pc_st3 = learn_circuit(train_x; maxiter = STRUDEL_ITERATIONS3, verbose = false)
     if VERBOSE
-        println("[$db_name][Strudel] nodes/pars/models=$(num_nodes(pc_st))/$(num_parameters(pc_st))/$(log2(model_count(pc_st)))")
+        println("[$db_name][Strudel] nodes/pars/models=$(num_nodes(pc_st1))/$(num_parameters(pc_st1))/$(log2(model_count(pc_st1)))")
+        println("[$db_name][Strudel] nodes/pars/models=$(num_nodes(pc_st2))/$(num_parameters(pc_st2))/$(log2(model_count(pc_st2)))")
+        println("[$db_name][Strudel] nodes/pars/models=$(num_nodes(pc_st3))/$(num_parameters(pc_st3))/$(log2(model_count(pc_st3)))")
     end
-    write(myfile,"[$db_name][Strudel] nodes/pars/models=$(num_nodes(pc_st))/$(num_parameters(pc_st))/$(log2(model_count(pc_st)))\n")
+    write(myfile,"[$db_name][Strudel $STRUDEL_ITERATIONS1] nodes/pars/models=$(num_nodes(pc_st1))/$(num_parameters(pc_st1))/$(log2(model_count(pc_st1)))\n")
+    write(myfile,"[$db_name][Strudel $STRUDEL_ITERATIONS2] nodes/pars/models=$(num_nodes(pc_st2))/$(num_parameters(pc_st2))/$(log2(model_count(pc_st2)))\n")
+    write(myfile,"[$db_name][Strudel $STRUDEL_ITERATIONS3] nodes/pars/models=$(num_nodes(pc_st3))/$(num_parameters(pc_st3))/$(log2(model_count(pc_st3)))\n")
     #@time
     pc_sl = learn_circuit_slopp(vtree_cl,train_x,db_name,nc,thresh)
     #@time
     pc_sl = load_prob_circuit("$db_name-$nc-$thresh.psdd")
-    @assert isstruct_decomposable(pc_sl) & isstruct_decomposable(pc_cl) & isstruct_decomposable(pc_st) & isstruct_decomposable(pc_ff)
+    @assert isstruct_decomposable(pc_sl) & isstruct_decomposable(pc_cl) & isstruct_decomposable(pc_st1) & isstruct_decomposable(pc_st2) & isstruct_decomposable(pc_st3) & isstruct_decomposable(pc_ff)
     if VERBOSE
-        println("[$db_name][SLoPP] nodes/pars/models=$(num_nodes(pc_sl))/$(num_parameters(pc_sl))/$(round(log2(model_count(pc_sl))))")
+        println("[$db_name][SLoPP] nodes/pars/models=$(num_nodes(pc_sl))/$(num_parameters(pc_sl))/$(round(log2(model_count(pc_sl));digits=2))")
     end
-    write(myfile,"[$db_name][SLoPP] nodes/pars/models=$(num_nodes(pc_sl))/$(num_parameters(pc_sl))/$(round(log2(model_count(pc_sl))))\n")
+    write(myfile,"[$db_name][SLoPP] nodes/pars/models=$(num_nodes(pc_sl))/$(num_parameters(pc_sl))/$(round(log2(model_count(pc_sl));digits=2))\n")
     #vtree_bal = Vtree(num_features(train_x), :balanced) # ex vtree2
     train_x2 = unique(train_x)
-    tot = [0.0, 0.0, 0.0, 0.0]
-    imp = [0.0, 0.0, 0.0]
+    tot = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] # DEBUG: compact specification
+    imp = [0.0, 0.0, 0.0, 0.0, 0.0]
     exc = 0
     indb_possible = 0
     indb_impossible = 0
@@ -285,14 +293,18 @@ function experiment(db_name::String,nc::Int64,thresh::Int64,test_size::Int64=-1)
                 tot[1] += log_likelihood_avg(pc_sl, test_x[j:j,:])
                 tot[2] += log_likelihood_avg(pc_ff, test_x[j:j,:])
                 tot[3] += log_likelihood_avg(pc_cl, test_x[j:j,:])
-                tot[4] += log_likelihood_avg(pc_st, test_x[j:j,:])
+                tot[4] += log_likelihood_avg(pc_st1, test_x[j:j,:])
+                tot[5] += log_likelihood_avg(pc_st2, test_x[j:j,:])
+                tot[6] += log_likelihood_avg(pc_st3, test_x[j:j,:])
                 if size(findall(i->i==true,[train_x2[k:k,:]==test_x[j:j,:] for k in 1:size(train_x2,1)]),1)>0
                     indb_possible += 1
                 end
             else
                 imp[1] += log_likelihood_avg(pc_ff, test_x[j:j,:])
                 imp[2] += log_likelihood_avg(pc_cl, test_x[j:j,:])
-                imp[3] += log_likelihood_avg(pc_st, test_x[j:j,:])
+                imp[3] += log_likelihood_avg(pc_st1, test_x[j:j,:])
+                imp[4] += log_likelihood_avg(pc_st2, test_x[j:j,:])
+                imp[5] += log_likelihood_avg(pc_st3, test_x[j:j,:])
                 exc += 1
                 if size(findall(i->i==true,[train_x2[k:k,:]==test_x[j:j,:] for k in 1:size(train_x2,1)]),1)>0
                     indb_impossible += 1
@@ -303,13 +315,27 @@ function experiment(db_name::String,nc::Int64,thresh::Int64,test_size::Int64=-1)
     tot = tot/(test_size-exc)
     imp = imp/(exc)
     if VERBOSE
-        println("[$db_name][average LL]SLOPP/FF/CL/ST=$tot")
-        println("[$db_name][impossible LL]FF/CL/ST=$imp")
+        println("[$db_name][average LL]SLOPP/FF/CL/ST123=$tot")
+        println("[$db_name][impossible LL]FF/CL/ST123=$imp")
         println("[$db_name]exceptions=$exc,possible_indb=$indb_possible,impossible_indb=$indb_impossible")
+        print(db_name,",",nc,",",thresh,",",n_features,",",STRUDEL_ITERATIONS1,",",STRUDEL_ITERATIONS2,",",STRUDEL_ITERATIONS3,",",train_size,",",test_size,",",unique1,",",unique2,",",tot,",",imp,",",exc,",",indb_possible)
+        print(num_nodes(pc_sl),",",num_parameters(pc_sl),",",log2(model_count(pc_sl)),",")
+        print(num_nodes(pc_cl),",",num_parameters(pc_cl),",",log2(model_count(pc_cl)),",")
+        print(num_nodes(pc_ff),",",num_parameters(pc_ff),",",log2(model_count(pc_ff)),",")
+        print(num_nodes(pc_st1),",",num_parameters(pc_st1),",",log2(model_count(pc_st1)),",")
+        print(num_nodes(pc_st2),",",num_parameters(pc_st2),",",log2(model_count(pc_st2)),",")
+        println(num_nodes(pc_st3),",",num_parameters(pc_st3),",",log2(model_count(pc_st3)))
     end
     write(myfile,"[$db_name][average LL]SLOPP/FF/CL/ST=$tot\n")
     write(myfile,"[$db_name][impossible LL]FF/CL/ST=$imp\n")
     write(myfile,"[$db_name]exceptions=$exc,possible_indb=$indb_possible,impossible_indb=$indb_impossible\n")
+    write(myfile,db_name,",",nc,",",thresh,",",n_features,",",STRUDEL_ITERATIONS1,",",STRUDEL_ITERATIONS2,",",STRUDEL_ITERATIONS3,",",train_size,",",test_size,",",unique1,",",unique2,",",tot,",",imp,",",exc,",",indb_possible)
+    write(myfile,"$(num_nodes(pc_sl)),$(num_parameters(pc_sl)),$(log2(model_count(pc_sl)))")
+    write(myfile,"$(num_nodes(pc_cl)),$(num_parameters(pc_cl)),$(log2(model_count(pc_cl)))")
+    write(myfile,"$(num_nodes(pc_ff)),$(num_parameters(pc_ff)),$(log2(model_count(pc_ff)))")
+    write(myfile,"$(num_nodes(pc_st1)),$(num_parameters(pc_st1)),$(log2(model_count(pc_st1)))")
+    write(myfile,"$(num_nodes(pc_st2)),$(num_parameters(pc_st2)),$(log2(model_count(pc_st2)))")
+    write(myfile,"$(num_nodes(pc_st3)),$(num_parameters(pc_st3)),$(log2(model_count(pc_st3)))")
     close(myfile)
 end
 end
@@ -454,9 +480,16 @@ write_psdd_file(sdd,vtree,"$dbname-$n_cl-$threshold")
 return true
 end
 
-#DATABASES_NAMES = ["nltcs","msnbc","kdd","plants","jester","bnetflix","baudio","accidents","tretail","pumsb_star",
-#"dna","kosarek","msweb","tmovie","book","cwebkb","cr52","c20ng","ad","bbc","binarized_mnist"]
-#for i = [1]#,3]
+DATABASES_NAMES = ["nltcs","msnbc","kdd","plants","jester","bnetflix","baudio","accidents","tretail","pumsb_star","dna","kosarek","msweb","tmovie","book","cwebkb","cr52","c20ng","ad","bbc","binarized_mnist"]
+DATABASES_NAMES = ["nltcs","plants"]
+
+@sync begin
+for db_name in DATABASES_NAMES
+@spawn  begin
+            experiment(db_name,2,5000,0)
+        end
+end
+
 #    #@spawn
 #    experiment(DATABASES_NAMES[i],1,500,0) # Best
 #end
@@ -489,7 +522,5 @@ end
 # end
 #c = kmeans(train_x, 2)#; rng = Random.seed!(2020))
 #@time experiment("msnbc",1,1000) # Best
-
-
-
 end # module
+end
