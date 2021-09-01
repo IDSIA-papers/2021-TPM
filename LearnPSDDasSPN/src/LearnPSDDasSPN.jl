@@ -1,5 +1,6 @@
 module LearnPSDDasSPN
 
+using Printf
 using LogicCircuits
 using ProbabilisticCircuits
 using DataFrames
@@ -15,37 +16,37 @@ using SimpleWeightedGraphs
 using MetaGraphs
 using LogicCircuits.LoadSave: get_vtree2id
 using Metis: idx_t, ishermitian
+using Random
 import Base.Threads.@spawn
 
-#using Random, ParallelKMeans
-#using TikzPictures
-#TikzPictures.standaloneWorkaround(true)
+Random.seed!(1234); # Clustering Reproducibility (kmeans with random init)
 
 STRUDEL_ITERATIONS1 = 50
-STRUDEL_ITERATIONS2 = 100
-STRUDEL_ITERATIONS3 = 500
-FAST = false
-LEARNVTREE = true
+STRUDEL_ITERATIONS2 = 500
+DEBUGGING_MODE = false
+LEARN_VTREE = false
 VERBOSE = true
 δINT = 999999
 MIN_INT = 1
 MAX_INT = δINT + MIN_INT
 
-# DEBUG: remove mutable?
+
+
 @with_kw mutable struct mynode
-    vtree::PlainVtree # = nothing
-    db::DataFrame = DataFrame() # nothing #::DataFrame = DataFrame()
+    vtree::PlainVtree # DEBUG: remove, use vtree index only
+    db::DataFrame = DataFrame() # DEBUG: replace by row indexes only
     label::String = "D" # Label
-    position::String = ""
-    parent::Int = -1
-    literal::Int = 0
+    position::String = "" # DEBUG: prime or sub, to remove in the final version
+    parent::Int64 = -1
+    literal::Int64 = 0
     visited::Bool = false
     theta::Float64 = -1.0
     left::Vector{Int64} = []
     right::Vector{Int64} = []
+    vindex::Int64 = 0
 end
 
-struct WeightedGraph
+struct WeightedGraph # From Juice DEBUG: replace with inclusion
     nvtxs::idx_t
     xadj::Vector{idx_t}
     adjncy::Vector{idx_t}
@@ -53,7 +54,7 @@ struct WeightedGraph
     WeightedGraph(nvtxs, xadj, adjncy, adjwgt) = new(nvtxs, xadj, adjncy, adjwgt)
 end
 
-function my_graph(G::SparseMatrixCSC; check_hermitian=true)
+function my_graph(G::SparseMatrixCSC; check_hermitian=true)  # From Juice DEBUG: replace with inclusion
     if check_hermitian
         ishermitian(G) || throw(ArgumentError("matrix must be Hermitian"))
     end
@@ -81,7 +82,7 @@ function my_graph(G::SparseMatrixCSC; check_hermitian=true)
     return WeightedGraph(idx_t(N), xadj, adjncy, adjwgt)
 end
 
-function my_partition(G::WeightedGraph, nparts::Integer)
+function my_partition(G::WeightedGraph, nparts::Integer)  # From Juice DEBUG: replace with inclusion
     part = Vector{Metis.idx_t}(undef, G.nvtxs)
     edgecut = fill(idx_t(0), 1)
     Metis.METIS_PartGraphRecursive(G.nvtxs, idx_t(1), G.xadj, G.adjncy, C_NULL, C_NULL, G.adjwgt,
@@ -89,52 +90,41 @@ function my_partition(G::WeightedGraph, nparts::Integer)
     return part
 end
 
-function clustering_can_be_done(unique_row::Int64, n_clusters::Int64, threshold::Int64)
-    return unique_row > threshold && n_clusters > 1
+
+function clustering_can_be_done(n_rows::Int64,n_cols::Int64, n_clsts::Int64,threshold_rows::Int64,threshold_cols::Int64)
+    return n_rows >= threshold_rows && n_cols <= threshold_cols && n_clsts > 1
 end
 
-function expand_psdd(nd::mynode,active::Int64,titles::Vector{String},ncl::Int64,thr::Int64)
-    if LEARNVTREE
-        l = typeof(nd.vtree.left) == PlainVtreeLeafNode ? [Int(variable(nd.vtree.left))] : [Int(n) for n in variables(nd.vtree.left)]
-        r = typeof(nd.vtree.right) == PlainVtreeLeafNode ? [Int(variable(nd.vtree.right))] : [Int(n) for n in variables(nd.vtree.right)]
-    else
-        l = nd.left
-        r = nd.right
-    end
+function expand_psdd(nd::mynode,active::Int64,titles::Vector{String},ncl::Int64,thr1::Int64,thr2::Int64)
+    #if !LEARN_VTREE # DEBUG: other way round
+    l = typeof(nd.vtree.left) == PlainVtreeLeafNode ? [Int(variable(nd.vtree.left))] : [Int(n) for n in variables(nd.vtree.left)]
+    r = typeof(nd.vtree.right) == PlainVtreeLeafNode ? [Int(variable(nd.vtree.right))] : [Int(n) for n in variables(nd.vtree.right)]
+    #else
+    #    l = nd.left
+    #    r = nd.right
+    #end
     dl = nd.db[:,find_names(names(nd.db),l,titles)]
     dr = nd.db[:,find_names(names(nd.db),r,titles)]
+    #if length(nd.left) > 1 # Many vars on the left
     if typeof(nd.vtree.left) == PlainVtreeInnerNode # Many vars on the left
-        if length(variables(nd.vtree.left)) <= 3 && nrow(unique(dl)) > 3#," xx ")
-        #if clustering_can_be_done(nrow(unique(dl)),ncl,thr)
+        if clustering_can_be_done(nrow(unique(dl)),length(l),ncl,thr1,thr2)
             return expand_many_left_multiclusters(nd::mynode,active::Int64,dl,dr,ncl) #return n_c left and right clusters
         else
             return expand_many_left_singlecluster(nd::mynode,active::Int64,dl,dr)
         end
     else
-        if typeof(nd.vtree.right) == PlainVtreeInnerNode # Many variables on the right
+            #if length(nd.right) > 1 # Many variables on the right
+            if typeof(nd.vtree.right) == PlainVtreeInnerNode # Many variables on the right
             return expand_single_left_many_right(nd::mynode,active::Int64,dl,dr)
         else
             return expand_single_left_one_right(nd::mynode,active::Int64,dl,dr)
         end
     end
-    #=if length(nd.left) > 1 # Many vars on the left
-        if clustering_can_be_done(nrow(unique(dl)),ncl,thr)
-            return expand_many_left_multiclusters(nd::mynode,active::Int64,dl,dr) #return n_c left and right clusters
-        else
-            return expand_many_left_singlecluster(nd::mynode,active::Int64,dl,dr)
-        end
-    else
-        if length(nd.right) > 1 # Many variables on the right
-            return expand_single_left_many_right(nd::mynode,active::Int64,dl,dr)
-        else
-            return expand_single_left_one_right(nd::mynode,active::Int64,dl,dr)
-        end
-    end=#
 end
 
 function expand_many_left_multiclusters(nd::mynode,active::Int64,d_left::DataFrame,d_right::DataFrame,n_cl::Int64)
     elements = []
-    indx_l = clustering4(d_left, n_cl) # DEBUG: ass seed for randomness
+    indx_l = clustering4(d_left, n_cl) # DEBUG: import from Juice
     for c = 1:n_cl
         d_left_c = d_left[findall(x->x==c, indx_l),:]
         rename!(d_left_c,names(d_left))
@@ -232,112 +222,77 @@ else
 end
 end
 
-function experiment(db_name::String,nc::Int64,thresh::Int64,test_size::Int64=-1) # DEBUG: typing
+function experiment(db_name::String , nc::Int64, rows_threshold::Int64 , cols_threshold::Int64 , test_size::Int64=-1, topdown::Bool=false)
+
     train_x, valid_x, test_x = twenty_datasets(db_name)
-    if test_size > 0
-        test_x = test_x[1:test_size,:]
+    test_size > 0 && (test_x = test_x[1:test_size,:]) # Smaller test sets for quick debugging
+
+    row_db = @sprintf("[%s][DB]\t\t n_f=%i,n_train=%i(%i),n_test=%i(%i),top-down=%i\n",db_name, size(test_x,2),size(train_x,1),size(unique(train_x),1),size(test_x,1),size(unique(test_x),1),topdown)
+    row_pars = @sprintf("[%s][Pars]\t\t n_c=%i,threshold_row=%i,threshold_col=%i\n",db_name,nc,rows_threshold,cols_threshold)
+    row_str = @sprintf("[%s][Strudel]\t iterations=%i/%i\n",db_name,STRUDEL_ITERATIONS1,STRUDEL_ITERATIONS2)
+    VERBOSE && print(row_db,row_pars,row_str)
+
+    if topdown
+        t_vtree = @elapsed vtree = learn_vtree(train_x; alg=:topdown)
+    else
+        t_vtree = @elapsed pc_cl, vtree = learn_chow_liu_tree_circuit(train_x)
     end
-    test_size = size(test_x,1)
-    train_size = size(train_x,1)
-    n_features = size(test_x,2)
-    unique1 = size(unique(train_x),1)
-    unique2 = size(unique(test_x),1)
-    open("$db_name-$nc-$thresh-$test_size.results", "w") do myfile
-    if VERBOSE
-        println("[$db_name][DB] n_c=$nc, threshold=$thresh, |X|=$n_features, STRUDEL_ITERATIONS=$STRUDEL_ITERATIONS1 $STRUDEL_ITERATIONS2 $STRUDEL_ITERATIONS3, dim_train/test=$train_size($unique1)/$test_size($unique2)")
+
+    if !DEBUGGING_MODE
+
+        t_st1 = @elapsed pc_st1 = learn_circuit(train_x; maxiter = STRUDEL_ITERATIONS1, verbose = false)
+        t_st2 = @elapsed pc_st2 = learn_circuit(train_x; maxiter = STRUDEL_ITERATIONS2, verbose = false)
+        row_str1 = @sprintf("[%s][Strudel1]\t nodes/pars=%i/%i \t\t(%g sec)\n",db_name,num_nodes(pc_st1),num_parameters(pc_st1),t_st1)
+        row_str2 = @sprintf("[%s][Strudel2]\t nodes/pars=%i/%i \t\t(%g sec)\n",db_name,num_nodes(pc_st2),num_parameters(pc_st2),t_st2)
+        VERBOSE && print(row_str1,row_str2)
     end
-    write(myfile,"[$db_name][DB] n_c=$nc, threshold=$thresh, |X|=$n_features, dim_train/test=$train_size($unique1)/$test_size($unique2)\n")
-    #@time
-    pc_cl, vtree_cl = learn_chow_liu_tree_circuit(train_x)
-    if VERBOSE
-        println("[$db_name][Chow-Liu] nodes/pars/models=$(num_nodes(pc_cl))/$(num_parameters(pc_cl))/$(log2(model_count(pc_cl)))")
-    end
-    write(myfile,"[$db_name][Chow-Liu] nodes/pars/models=$(num_nodes(pc_cl))/$(num_parameters(pc_cl))/$(log2(model_count(pc_cl)))\n")
-    #@time
-    pc_ff = fully_factorized_circuit(StructProbCircuit, vtree_cl);
-    if VERBOSE
-        println("[$db_name][Fully-Factorized] nodes/pars/models=$(num_nodes(pc_ff))/$(num_parameters(pc_ff))/$(log2(model_count(pc_ff)))")
-    end
-    write(myfile,"[$db_name][Fully-Factorized] nodes/pars/models=$(num_nodes(pc_ff))/$(num_parameters(pc_ff))/$(log2(model_count(pc_ff)))\n")
-    #@time
-    pc_st1 = learn_circuit(train_x; maxiter = STRUDEL_ITERATIONS1, verbose = false)
-    pc_st2 = learn_circuit(train_x; maxiter = STRUDEL_ITERATIONS2, verbose = false)
-    pc_st3 = learn_circuit(train_x; maxiter = STRUDEL_ITERATIONS3, verbose = false)
-    if VERBOSE
-        println("[$db_name][Strudel] nodes/pars/models=$(num_nodes(pc_st1))/$(num_parameters(pc_st1))/$(log2(model_count(pc_st1)))")
-        println("[$db_name][Strudel] nodes/pars/models=$(num_nodes(pc_st2))/$(num_parameters(pc_st2))/$(log2(model_count(pc_st2)))")
-        println("[$db_name][Strudel] nodes/pars/models=$(num_nodes(pc_st3))/$(num_parameters(pc_st3))/$(log2(model_count(pc_st3)))")
-    end
-    write(myfile,"[$db_name][Strudel $STRUDEL_ITERATIONS1] nodes/pars/models=$(num_nodes(pc_st1))/$(num_parameters(pc_st1))/$(log2(model_count(pc_st1)))\n")
-    write(myfile,"[$db_name][Strudel $STRUDEL_ITERATIONS2] nodes/pars/models=$(num_nodes(pc_st2))/$(num_parameters(pc_st2))/$(log2(model_count(pc_st2)))\n")
-    write(myfile,"[$db_name][Strudel $STRUDEL_ITERATIONS3] nodes/pars/models=$(num_nodes(pc_st3))/$(num_parameters(pc_st3))/$(log2(model_count(pc_st3)))\n")
-    #@time
-    pc_sl = learn_circuit_slopp(vtree_cl,train_x,db_name,nc,thresh)
-    #@time
-    pc_sl = load_prob_circuit("$db_name-$nc-$thresh.psdd")
-    @assert isstruct_decomposable(pc_sl) & isstruct_decomposable(pc_cl) & isstruct_decomposable(pc_st1) & isstruct_decomposable(pc_st2) & isstruct_decomposable(pc_st3) & isstruct_decomposable(pc_ff)
-    if VERBOSE
-        println("[$db_name][SLoPP] nodes/pars/models=$(num_nodes(pc_sl))/$(num_parameters(pc_sl))/$(round(log2(model_count(pc_sl));digits=2))")
-    end
-    write(myfile,"[$db_name][SLoPP] nodes/pars/models=$(num_nodes(pc_sl))/$(num_parameters(pc_sl))/$(round(log2(model_count(pc_sl));digits=2))\n")
-    #vtree_bal = Vtree(num_features(train_x), :balanced) # ex vtree2
+
+    t_sl = @elapsed learn_circuit_slopp(vtree,train_x,db_name,nc,rows_threshold,cols_threshold,topdown)
+    t_sl2 = @elapsed pc_sl = load_prob_circuit("$db_name-$nc-$rows_threshold-$cols_threshold-$topdown.psdd")
+    @assert isstruct_decomposable(pc_sl)
+    row_sl = @sprintf("[%s][SLoPP]\t\t nodes/pars/mc=%i/%i/%g \t (%g + %g + %g sec)\n",db_name,num_nodes(pc_sl),num_parameters(pc_sl),round(log2(model_count(pc_sl)),digits=3),t_vtree,t_sl,t_sl2)
+    VERBOSE && print(row_sl)
+
     train_x2 = unique(train_x)
-    tot = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] # DEBUG: compact specification
-    imp = [0.0, 0.0, 0.0, 0.0, 0.0]
-    exc = 0
-    indb_possible = 0
-    indb_impossible = 0
-    if !FAST
-        @showprogress for j = 1:test_size
-            if log_likelihood_avg(pc_sl, test_x[j:j,:]) != -Inf
-                tot[1] += log_likelihood_avg(pc_sl, test_x[j:j,:])
-                tot[2] += log_likelihood_avg(pc_ff, test_x[j:j,:])
-                tot[3] += log_likelihood_avg(pc_cl, test_x[j:j,:])
-                tot[4] += log_likelihood_avg(pc_st1, test_x[j:j,:])
-                tot[5] += log_likelihood_avg(pc_st2, test_x[j:j,:])
-                tot[6] += log_likelihood_avg(pc_st3, test_x[j:j,:])
-                if size(findall(i->i==true,[train_x2[k:k,:]==test_x[j:j,:] for k in 1:size(train_x2,1)]),1)>0
-                    indb_possible += 1
-                end
-            else
-                imp[1] += log_likelihood_avg(pc_ff, test_x[j:j,:])
-                imp[2] += log_likelihood_avg(pc_cl, test_x[j:j,:])
-                imp[3] += log_likelihood_avg(pc_st1, test_x[j:j,:])
-                imp[4] += log_likelihood_avg(pc_st2, test_x[j:j,:])
-                imp[5] += log_likelihood_avg(pc_st3, test_x[j:j,:])
-                exc += 1
-                if size(findall(i->i==true,[train_x2[k:k,:]==test_x[j:j,:] for k in 1:size(train_x2,1)]),1)>0
-                    indb_impossible += 1
-                end
-            end
-        end
+    ll_comp = zeros(3)
+    ll_incomp = zeros(2)
+    incomp_instances = 0
+    indb_instances = 0
+    if !DEBUGGING_MODE
+         @showprogress for j = 1:size(test_x,1)
+            compatible = (log_likelihood_avg(pc_sl, test_x[j:j,:]) != -Inf)
+            compatible ? ll_comp[1] += log_likelihood_avg(pc_st1, test_x[j:j,:]) : ll_incomp[1] += log_likelihood_avg(pc_st1, test_x[j:j,:])
+            compatible ? ll_comp[2] += log_likelihood_avg(pc_st2, test_x[j:j,:]) : ll_incomp[2] += log_likelihood_avg(pc_st2, test_x[j:j,:])
+            compatible && (ll_comp[3] += log_likelihood_avg(pc_sl, test_x[j:j,:]))
+            (!compatible) && (incomp_instances += 1)
+            size(findall(i->i==true,[train_x2[k:k,:]==test_x[j:j,:] for k in 1:size(train_x2,1)]),1)>0 && (indb_instances += 1)
+         end
+     end
+
+    if !DEBUGGING_MODE
+        ll_comp /= (size(test_x,1)-incomp_instances)
+        ll_incomp /= incomp_instances
+        row_avg_ll_comp = @sprintf("[%s][LL_comp]\t ST1/2/SLoPP=%g,%g,%g\n",db_name,ll_comp[1],ll_comp[2],ll_comp[3])
+        row_avg_ll_incomp = @sprintf("[%s][LL_incomp]\t ST1/2=%g,%g (incompatible=%i , indb=%d)",db_name,ll_incomp[1],ll_incomp[2],incomp_instances,indb_instances)
+        VERBOSE && println(row_avg_ll_comp,row_avg_ll_incomp)
+        open("$db_name-$nc-$rows_threshold-$cols_threshold-$test_size-$topdown.results", "w") do myfile
+        write(myfile,row_db,row_pars,row_str,row_str1,row_str2,row_sl,row_avg_ll_comp,row_avg_ll_incomp)
+        s1 = @sprintf "%s,%g,%g," db_name round(incomp_instances/size(test_x,1)*100.0;digits=2) round(log2(model_count(pc_sl))/size(test_x,2)*100.0;digits=2)
+        s2 = @sprintf "%g,%g,%g," round(ll_comp[3];digits=2) round(ll_comp[1];digits=2) round(ll_comp[2];digits=2)
+        t_slopp = (t_vtree+t_sl+t_sl2)
+        s3 = @sprintf "%g,%g," round(t_st1/t_slopp;digits=2) round(t_st2/t_slopp;digits=2)
+        s4 = @sprintf "%g,%g\n" round(ll_incomp[1]-ll_comp[1];digits=2) round(ll_incomp[2]-ll_comp[2];digits=2)
+        println("db,gamma,sigma,ll_slopp,ll_strudel1,ll_strudel2,t_1,t_2,l_1,l_2")
+        println(s1,s2,s3,s4)
+        write(myfile,"db,gamma,sigma,ll_slopp,ll_strudel1,ll_strudel2,t_1,t_2,l_1,l_2")
+        write(myfile,s1,s2,s3,s4)
+        close(myfile)
     end
-    tot = tot/(test_size-exc)
-    imp = imp/(exc)
-    if VERBOSE
-        println("[$db_name][average LL]SLOPP/FF/CL/ST123=$tot")
-        println("[$db_name][impossible LL]FF/CL/ST123=$imp")
-        println("[$db_name]exceptions=$exc,possible_indb=$indb_possible,impossible_indb=$indb_impossible")
-        print(db_name,",",nc,",",thresh,",",n_features,",",STRUDEL_ITERATIONS1,",",STRUDEL_ITERATIONS2,",",STRUDEL_ITERATIONS3,",",train_size,",",test_size,",",unique1,",",unique2,",",tot,",",imp,",",exc,",",indb_possible)
-        print(num_nodes(pc_sl),",",num_parameters(pc_sl),",",log2(model_count(pc_sl)),",")
-        print(num_nodes(pc_cl),",",num_parameters(pc_cl),",",log2(model_count(pc_cl)),",")
-        print(num_nodes(pc_ff),",",num_parameters(pc_ff),",",log2(model_count(pc_ff)),",")
-        print(num_nodes(pc_st1),",",num_parameters(pc_st1),",",log2(model_count(pc_st1)),",")
-        print(num_nodes(pc_st2),",",num_parameters(pc_st2),",",log2(model_count(pc_st2)),",")
-        println(num_nodes(pc_st3),",",num_parameters(pc_st3),",",log2(model_count(pc_st3)))
+
+    #nc,rows_threshold,cols_threshold,test_size,topdown,n_f)
+    #println(db_name,nc,rows_threshold,cols_threshold,test_size,topdown,n_f)
+
     end
-    write(myfile,"[$db_name][average LL]SLOPP/FF/CL/ST=$tot\n")
-    write(myfile,"[$db_name][impossible LL]FF/CL/ST=$imp\n")
-    write(myfile,"[$db_name]exceptions=$exc,possible_indb=$indb_possible,impossible_indb=$indb_impossible\n")
-    write(myfile,db_name,",",nc,",",thresh,",",n_features,",",STRUDEL_ITERATIONS1,",",STRUDEL_ITERATIONS2,",",STRUDEL_ITERATIONS3,",",train_size,",",test_size,",",unique1,",",unique2,",",tot,",",imp,",",exc,",",indb_possible)
-    write(myfile,"$(num_nodes(pc_sl)),$(num_parameters(pc_sl)),$(log2(model_count(pc_sl)))")
-    write(myfile,"$(num_nodes(pc_cl)),$(num_parameters(pc_cl)),$(log2(model_count(pc_cl)))")
-    write(myfile,"$(num_nodes(pc_ff)),$(num_parameters(pc_ff)),$(log2(model_count(pc_ff)))")
-    write(myfile,"$(num_nodes(pc_st1)),$(num_parameters(pc_st1)),$(log2(model_count(pc_st1)))")
-    write(myfile,"$(num_nodes(pc_st2)),$(num_parameters(pc_st2)),$(log2(model_count(pc_st2)))")
-    write(myfile,"$(num_nodes(pc_st3)),$(num_parameters(pc_st3)),$(log2(model_count(pc_st3)))")
-    close(myfile)
-end
 end
 
 function write_psdd_file(s,v,filename)
@@ -390,13 +345,13 @@ function write_psdd_file(s,v,filename)
 end
 
 # Modified version of the Juice clustering to also retrieve the assignments of the clusters
-function clustering4(data, mix_num::Int64; maxiter=200)::Vector{Int64}
+function clustering4(data, mix_num::Int64)::Vector{Int64}
     # n = num_examples(data)
     if mix_num == 1
         return ones(Int64,size(data,1))
     end
     data = Matrix(data)
-    R = kmeans(data', mix_num; maxiter=maxiter) # DEBUG: initialization + maxiter
+    R = kmeans(data', mix_num; maxiter=100) #, init=:kmcen)
     @assert nclusters(R) == mix_num
     return assignments(R)
 end
@@ -410,22 +365,34 @@ function find_names(names_short::Vector{String},indexes_short::Vector{Int64},col
     return m
 end
 
-function learn_circuit_slopp(vtree::PlainVtree,dbase::DataFrame,dbname::String,n_cl::Int64,threshold::Int64)::Bool
+
+function partitioner(db::DataFrame)
+    weight=ones(Float64, num_examples(db))
+    (_, mi) = mutual_information(db, weight; α=0.0)
+    # # # vars = Var.(collect(1:num_features(d)))
+    info = to_long_mi(mi, MIN_INT, MAX_INT)
+    g = convert(SparseMatrixCSC, info)
+    partition = my_partition(my_graph(g), 2)
+    left_variables = findall(==(1), partition)
+    right_variables = findall(==(2), partition)
+return left_variables,right_variables
+end
+
+function learn_circuit_slopp(vtree::PlainVtree,dbase::DataFrame,dbname::String,n_cl::Int64,r_threshold::Int64,c_threshold::Int64, topdown::Bool)::Bool
 
     sdd = mynode[]
     titles = names(dbase)
     v = vtree
     d = dbase
+    vvv = [] # experimental
 
-    # weight=ones(Float64, num_examples(d))
-    # (_, mi) = mutual_information(d, weight; α=0.0)
-    # # vars = Var.(collect(1:num_features(d)))
-    # info = to_long_mi(mi, MIN_INT, MAX_INT)
-    # g = convert(SparseMatrixCSC, info)
-    # partition = my_partition(my_graph(g), 2)
-    # left_variables = findall(==(1), partition)
-    # right_variables = findall(==(2), partition)
-    root_node = mynode(vtree=v, db=d) #, left=left_variables, right=right_variables)
+    if false #LEARN_VTREE
+        left_variables, right_variables = partitioner(d)
+        root_node = mynode(vtree=v, db=d, left=left_variables, right=right_variables)
+        push!(vvv,[left_variables,right_variables]) # experimental
+    else
+        root_node = mynode(vtree=v, db=d)
+    end
 
     push!(sdd,root_node)
     active = 1 # index of the decision node to be processed
@@ -434,93 +401,67 @@ function learn_circuit_slopp(vtree::PlainVtree,dbase::DataFrame,dbname::String,n
         v = sdd[active].vtree # current vtree
         d = sdd[active].db    # current db
         sdd[active].visited = true
-        elements = expand_psdd(sdd[active],active,titles,n_cl,threshold)
+        elements = expand_psdd(sdd[active],active,titles,n_cl,r_threshold,c_threshold)
         for e in elements
             push!(sdd,e)
         end
-    active = findfirst(isequal(false),mappedarray((x) -> x.visited, sdd))
-    # VTREE LEARNING
-    # if LEARNVTREE
+        active = findfirst(isequal(false),mappedarray((x) -> x.visited, sdd))
+    end
+    # if false #LEARN_VTREE
     # if !isnothing(active)
     # if length(sdd[active].left) == 0
-    #     n_cols = size(sdd[active].db,2)
-    #     mi2 = zeros(Float64, n_cols, n_cols)
-    #     for k = 1:length(sdd)
-    #         if names(sdd[k].db)==names(sdd[active].db)
-    #             weight=ones(Float64, num_examples(sdd[k].db))
-    #             (_, mi) = mutual_information(sdd[k].db, weight; α=0.0)
-    #             mi2 = mi2 + mi
-    #         end
-    #     end
-    #     # info2 = to_long_mi(mi2, MIN_INT, MAX_INT)
-    #     # g2 = convert(SparseMatrixCSC, info2)
-    #     # partition2 = my_partition(my_graph(g2), 2)
-    #     # left_variables2 = findall(==(1), partition2)
-    #     # right_variables2 = findall(==(2), partition2)
-    #     # nm = names(sdd[active].db)
-    #     # lnm = nm[left_variables2]
-    #     # rnm = nm[right_variables2]
-    #     # left_vars_partitioned = [parse(Int,q[2:end]) for q in lnm]
-    #     # right_vars_partitioned = [parse(Int,q[2:end]) for q in rnm]
-    #     for k = 1:length(sdd)
-    #         if names(sdd[k].db)==names(sdd[active].db)
-    #             sdd[k].left = left_vars_partitioned
-    #             sdd[k].right = right_vars_partitioned
-    #         end
-    #     end
+    #      n_cols = size(sdd[active].db,2)
+    #      #if n_cols > 1
+    #          #println(n_cols," xx x xxx x ")
+    #      mi2 = zeros(Float64, n_cols, n_cols)
+    #      for k = 1:length(sdd)
+    #          if names(sdd[k].db)==names(sdd[active].db)
+    #              weight=ones(Float64, num_examples(sdd[k].db))
+    #              (_, mi) = mutual_information(sdd[k].db, weight; α=0.0)
+    #              mi2 = mi2 + mi
+    #          end
+    #      end
+    #      info2 = to_long_mi(mi2, MIN_INT, MAX_INT) # DEBUG: check max_int
+    #      g2 = convert(SparseMatrixCSC, info2)
+    #      partition2 = my_partition(my_graph(g2), 2)
+    #      println(partition2)
+    #      left_variables2 = findall(==(1), partition2)
+    #      right_variables2 = findall(==(2), partition2)
+    #      nm = names(sdd[active].db)
+    #      lnm = nm[left_variables2]
+    #      rnm = nm[right_variables2]
+    #      left_vars_partitioned = [parse(Int,q[2:end]) for q in lnm]
+    #      right_vars_partitioned = [parse(Int,q[2:end]) for q in rnm]
+    #      push!(vvv,[left_vars_partitioned,right_vars_partitioned]) # experimental
+    #      for k = 1:length(sdd)
+    #          if names(sdd[k].db)==names(sdd[active].db)
+    #              sdd[k].left = left_vars_partitioned
+    #              sdd[k].right = right_vars_partitioned
+    #          end
+    #      end
+    #  end
+    # #end
     # end
     # end
-    # end
+
+    file_id = "$dbname-$n_cl-$r_threshold-$c_threshold-$topdown"
+    write_psdd_file(sdd,vtree,file_id)
+    return true
 end
 
-#for node in sdd
-#    println(names(node.db),node.left,node.right)
-#end
-write_psdd_file(sdd,vtree,"$dbname-$n_cl-$threshold")
-return true
-end
+#DATABASES_NAMES = ["nltcs","msnbc","kdd","plants","jester","bnetflix","baudio","accidents","tretail","pumsb_star","dna","kosarek","msweb","tmovie","book","cwebkb","cr52","c20ng","ad","bbc","binarized_mnist"]
+DATABASES_NAMES = ["nltcs"]
 
-DATABASES_NAMES = ["nltcs","msnbc","kdd","plants","jester","bnetflix","baudio","accidents","tretail","pumsb_star","dna","kosarek","msweb","tmovie","book","cwebkb","cr52","c20ng","ad","bbc","binarized_mnist"]
-DATABASES_NAMES = ["nltcs","plants"]
+#@time experiment("jester",2,3,2,0,false)
+#@time experiment("jester",2,3,2,0,true)
 
 @sync begin
 for db_name in DATABASES_NAMES
-@spawn  begin
-            experiment(db_name,2,5000,0)
-        end
-end
-
-#    #@spawn
-#    experiment(DATABASES_NAMES[i],1,500,0) # Best
-#end
-#@spawn
-#experiment("nltcs",2,5000,0) # Best
-#@spawn#experiment("msnbc",2,5000,0)
-#@spawn experiment("kdd",2,5000,0)
-#@spawn experiment("plants",2,5000,0)
-#@spawn experiment("jester",2,5000,0)
-#experiment("tretail",2,5000,0) #"Fast and good"
-#@time experiment("pumsb_star",2,5000,0) #"Fast and good"
-#@time experiment("kosarek",2,5000,0) # Fast and so and so provare 10000?
-#@time experiment("msweb",2,5000,0) # Fast-medium and good
-#@time  experiment("dna",2,5000,0) # Too good because of the few possible
-#experiment("accidents",2,5000,0) #terzo class
-#@time #experiment("bnetflix",1,5000,0) good
-#experiment("baudio",2,5000,0) #bad as dna
-#@time experiment("tmovie",1,2000,200) # Slow
-#@time experiment("book",2,2000,200) # Slow
-#@time experiment("cwebkb",2,2000,200) # Slow
-#@timeexperiment("cr52",2,5000,0) # Slow-med Bad
-#@time experiment("c20ng",2,2000,0) # Slow
-#@time experiment("ad",2,5000,0) # Slow
-#@time experiment("bbc",2,5000,0) #
-#@time experiment("binarized_mnist",2,5000,0) #
-#experiment("plants",2,5000,0) # Best
-# Threads.@threads for db in db_names
-#     train_x, valid_x, test_x = twenty_datasets(db)
-#     println(" ",db,size(train_x),size(test_x))
-# end
-#c = kmeans(train_x, 2)#; rng = Random.seed!(2020))
-#@time experiment("msnbc",1,1000) # Best
-end # module
+@spawn begin
+#              #@time
+              experiment(db_name,2,3,2,0,false)
+#              #@time experiment(db_name,2,3,2,0,true)
+          end
+ end
+ end
 end
