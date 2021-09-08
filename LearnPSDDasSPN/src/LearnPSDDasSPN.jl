@@ -19,18 +19,15 @@ using Metis: idx_t, ishermitian
 using Random
 import Base.Threads.@spawn
 
-Random.seed!(1234); # Clustering Reproducibility (kmeans with random init)
-
+Random.seed!(1234); # Clustering Reproducibility (kmeans needs a random init)
 STRUDEL_ITERATIONS1 = 50
 STRUDEL_ITERATIONS2 = 500
-DEBUGGING_MODE = false
+DEBUGGING_MODE = true
 LEARN_VTREE = false
-VERBOSE = true
+VERBOSE = false
 δINT = 999999
 MIN_INT = 1
 MAX_INT = δINT + MIN_INT
-
-
 
 @with_kw mutable struct mynode
     vtree::PlainVtree # DEBUG: remove, use vtree index only
@@ -89,7 +86,6 @@ function my_partition(G::WeightedGraph, nparts::Integer)  # From Juice DEBUG: re
                                  idx_t(nparts), C_NULL, C_NULL, Metis.options, edgecut, part)
     return part
 end
-
 
 function clustering_can_be_done(n_rows::Int64,n_cols::Int64, n_clsts::Int64,threshold_rows::Int64,threshold_cols::Int64)
     return n_rows >= threshold_rows && n_cols <= threshold_cols && n_clsts > 1
@@ -227,38 +223,40 @@ function experiment(db_name::String , nc::Int64, rows_threshold::Int64 , cols_th
     train_x, valid_x, test_x = twenty_datasets(db_name)
     test_size > 0 && (test_x = test_x[1:test_size,:]) # Smaller test sets for quick debugging
 
-    row_db = @sprintf("[%s][DB]\t\t n_f=%i,n_train=%i(%i),n_test=%i(%i),top-down=%i\n",db_name, size(test_x,2),size(train_x,1),size(unique(train_x),1),size(test_x,1),size(unique(test_x),1),topdown)
-    row_pars = @sprintf("[%s][Pars]\t\t n_c=%i,threshold_row=%i,threshold_col=%i\n",db_name,nc,rows_threshold,cols_threshold)
-    row_str = @sprintf("[%s][Strudel]\t iterations=%i/%i\n",db_name,STRUDEL_ITERATIONS1,STRUDEL_ITERATIONS2)
-    VERBOSE && print(row_db,row_pars,row_str)
+    row_db = @sprintf("%s,n_f=%i,n_train=%i(%i),n_test=%i(%i),top-down=%i,",db_name, size(test_x,2),size(train_x,1),size(unique(train_x),1),size(test_x,1),size(unique(test_x),1),topdown)
+    row_pars = @sprintf("n_c=%i,threshold_row=%i,threshold_col=%i\n",nc,rows_threshold,cols_threshold)
+
+    VERBOSE && print(row_db,row_pars)
 
     if topdown
         t_vtree = @elapsed vtree = learn_vtree(train_x; alg=:topdown)
     else
         t_vtree = @elapsed pc_cl, vtree = learn_chow_liu_tree_circuit(train_x)
     end
-
-    if !DEBUGGING_MODE
-
+    if true #!DEBUGGING_MODE
         t_st1 = @elapsed pc_st1 = learn_circuit(train_x; maxiter = STRUDEL_ITERATIONS1, verbose = false)
         t_st2 = @elapsed pc_st2 = learn_circuit(train_x; maxiter = STRUDEL_ITERATIONS2, verbose = false)
-        row_str1 = @sprintf("[%s][Strudel1]\t nodes/pars=%i/%i \t\t(%g sec)\n",db_name,num_nodes(pc_st1),num_parameters(pc_st1),t_st1)
-        row_str2 = @sprintf("[%s][Strudel2]\t nodes/pars=%i/%i \t\t(%g sec)\n",db_name,num_nodes(pc_st2),num_parameters(pc_st2),t_st2)
+        row_str1 = @sprintf("%s,strudel%i_nodes/pars=%i/%i,t1=%g,",db_name,STRUDEL_ITERATIONS1,num_nodes(pc_st1),num_parameters(pc_st1),t_st1)
+        row_str2 = @sprintf("strudel%i_nodes/pars=%i/%i,t2=%g\n",STRUDEL_ITERATIONS2,num_nodes(pc_st2),num_parameters(pc_st2),t_st2)
         VERBOSE && print(row_str1,row_str2)
-    end
 
-    t_sl = @elapsed learn_circuit_slopp(vtree,train_x,db_name,nc,rows_threshold,cols_threshold,topdown)
-    t_sl2 = @elapsed pc_sl = load_prob_circuit("$db_name-$nc-$rows_threshold-$cols_threshold-$topdown.psdd")
-    @assert isstruct_decomposable(pc_sl)
-    row_sl = @sprintf("[%s][SLoPP]\t\t nodes/pars/mc=%i/%i/%g \t (%g + %g + %g sec)\n",db_name,num_nodes(pc_sl),num_parameters(pc_sl),round(log2(model_count(pc_sl)),digits=3),t_vtree,t_sl,t_sl2)
-    VERBOSE && print(row_sl)
+        t_sl = @elapsed learn_circuit_slopp(vtree,train_x,db_name,nc,rows_threshold,cols_threshold,topdown)
+        t_sl2 = @elapsed pc_sl = load_prob_circuit("$db_name-$nc-$rows_threshold-$cols_threshold-$topdown.psdd")
+        t_slopp = (t_vtree+t_sl+t_sl2)
+        g_st1 = num_parameters(pc_st1)
+        g_st2 = num_parameters(pc_st2)
+        g_slopp = num_parameters(pc_sl)
+        @assert isstruct_decomposable(pc_sl)
+        row_sl = @sprintf("%s,SLoPP_nodes/pars/mc=%i/%i/%g,t=%g,%i\n",db_name,num_nodes(pc_sl),num_parameters(pc_sl),round(log2(model_count(pc_sl)),digits=3),t_slopp,isdeterministic(pc_sl))
+        VERBOSE && print(row_sl)
+    end
 
     train_x2 = unique(train_x)
     ll_comp = zeros(3)
     ll_incomp = zeros(2)
     incomp_instances = 0
     indb_instances = 0
-    if !DEBUGGING_MODE
+    if true #!DEBUGGING_MODE
          @showprogress for j = 1:size(test_x,1)
             compatible = (log_likelihood_avg(pc_sl, test_x[j:j,:]) != -Inf)
             compatible ? ll_comp[1] += log_likelihood_avg(pc_st1, test_x[j:j,:]) : ll_incomp[1] += log_likelihood_avg(pc_st1, test_x[j:j,:])
@@ -269,29 +267,24 @@ function experiment(db_name::String , nc::Int64, rows_threshold::Int64 , cols_th
          end
      end
 
-    if !DEBUGGING_MODE
+    if true #!DEBUGGING_MODE
         ll_comp /= (size(test_x,1)-incomp_instances)
         ll_incomp /= incomp_instances
-        row_avg_ll_comp = @sprintf("[%s][LL_comp]\t ST1/2/SLoPP=%g,%g,%g\n",db_name,ll_comp[1],ll_comp[2],ll_comp[3])
-        row_avg_ll_incomp = @sprintf("[%s][LL_incomp]\t ST1/2=%g,%g (incompatible=%i , indb=%d)",db_name,ll_incomp[1],ll_incomp[2],incomp_instances,indb_instances)
+        row_avg_ll_comp = @sprintf("%s,comp_ST1/2/SLoPP=%g,%g,%g,",db_name,ll_comp[1],ll_comp[2],ll_comp[3])
+        row_avg_ll_incomp = @sprintf("incomp_ST1/2=%g,%g,incompatible=%i,indb=%d\n",ll_incomp[1],ll_incomp[2],incomp_instances,indb_instances)
         VERBOSE && println(row_avg_ll_comp,row_avg_ll_incomp)
-        open("$db_name-$nc-$rows_threshold-$cols_threshold-$test_size-$topdown.results", "w") do myfile
-        write(myfile,row_db,row_pars,row_str,row_str1,row_str2,row_sl,row_avg_ll_comp,row_avg_ll_incomp)
-        s1 = @sprintf "%s,%g,%g," db_name round(incomp_instances/size(test_x,1)*100.0;digits=2) round(log2(model_count(pc_sl))/size(test_x,2)*100.0;digits=2)
-        s2 = @sprintf "%g,%g,%g," round(ll_comp[3];digits=2) round(ll_comp[1];digits=2) round(ll_comp[2];digits=2)
-        t_slopp = (t_vtree+t_sl+t_sl2)
-        s3 = @sprintf "%g,%g," round(t_st1/t_slopp;digits=2) round(t_st2/t_slopp;digits=2)
-        s4 = @sprintf "%g,%g\n" round(ll_incomp[1]-ll_comp[1];digits=2) round(ll_incomp[2]-ll_comp[2];digits=2)
-        println("db,gamma,sigma,ll_slopp,ll_strudel1,ll_strudel2,t_1,t_2,l_1,l_2")
+        open("summary_$db_name-$nc-$rows_threshold-$cols_threshold-$test_size-$topdown.results", "w") do myfile
+        write(myfile,row_db,row_pars,row_str1,row_str2,row_sl,row_avg_ll_comp,row_avg_ll_incomp)
+        gamma = incomp_instances
+        gamma = round(incomp_instances/size(test_x,1)*100.0;digits=2)
+        s1 = @sprintf("summary,%s,%g,%g,%g,%g,",db_name,ll_comp[1],ll_comp[2],ll_comp[3],gamma) # round(log2(model_count(pc_sl))/size(test_x,2)*100.0;digits=2)
+        s2 = @sprintf "%g,%g," round(t_st1/t_slopp;digits=2) round(t_st2/t_slopp;digits=2)
+        s3 = @sprintf "%g,%g," round(g_st1/g_slopp;digits=2) round(g_st2/g_slopp;digits=2)
+        s4 = @sprintf "%g,%g\n" round(ll_incomp[1];digits=2) round(ll_incomp[2];digits=2)
         println(s1,s2,s3,s4)
-        write(myfile,"db,gamma,sigma,ll_slopp,ll_strudel1,ll_strudel2,t_1,t_2,l_1,l_2")
         write(myfile,s1,s2,s3,s4)
         close(myfile)
     end
-
-    #nc,rows_threshold,cols_threshold,test_size,topdown,n_f)
-    #println(db_name,nc,rows_threshold,cols_threshold,test_size,topdown,n_f)
-
     end
 end
 
@@ -444,24 +437,23 @@ function learn_circuit_slopp(vtree::PlainVtree,dbase::DataFrame,dbname::String,n
     # end
     # end
 
+    # "$db_name-$nc-$rows_threshold-$cols_threshold-$test_size-$topdown.results"
     file_id = "$dbname-$n_cl-$r_threshold-$c_threshold-$topdown"
     write_psdd_file(sdd,vtree,file_id)
     return true
 end
 
-#DATABASES_NAMES = ["nltcs","msnbc","kdd","plants","jester","bnetflix","baudio","accidents","tretail","pumsb_star","dna","kosarek","msweb","tmovie","book","cwebkb","cr52","c20ng","ad","bbc","binarized_mnist"]
-DATABASES_NAMES = ["nltcs"]
+DATABASES_NAMES = ["plants"] #"nltcs"]
+#"nltcs",,"kdd","plants","jester","bnetflix","baudio","accidents","tretail","pumsb_star","dna","kosarek","msweb","tmovie","book","cwebkb","cr52","c20ng","ad","bbc"]
 
-#@time experiment("jester",2,3,2,0,false)
-#@time experiment("jester",2,3,2,0,true)
 
 @sync begin
 for db_name in DATABASES_NAMES
 @spawn begin
-#              #@time
-              experiment(db_name,2,3,2,0,false)
-#              #@time experiment(db_name,2,3,2,0,true)
+            println(db_name)
+            @time experiment(db_name,2,3,2,0,false)
+            @time experiment(db_name,2,3,2,0,true)
           end
- end
- end
+end
+end
 end
