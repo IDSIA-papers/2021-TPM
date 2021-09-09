@@ -24,7 +24,7 @@ STRUDEL_ITERATIONS1 = 50
 STRUDEL_ITERATIONS2 = 500
 DEBUGGING_MODE = true
 LEARN_VTREE = false
-VERBOSE = false
+VERBOSE = true
 δINT = 999999
 MIN_INT = 1
 MAX_INT = δINT + MIN_INT
@@ -443,17 +443,17 @@ function learn_circuit_slopp(vtree::PlainVtree,dbase::DataFrame,dbname::String,n
     return true
 end
 
-DATABASES_NAMES = ["plants"] #"nltcs"]
+DATABASES_NAMES = ["book"] #"kdd", "nltcs"]
 #"nltcs",,"kdd","plants","jester","bnetflix","baudio","accidents","tretail","pumsb_star","dna","kosarek","msweb","tmovie","book","cwebkb","cr52","c20ng","ad","bbc"]
 
 
-@sync begin
+#@sync begin
 for db_name in DATABASES_NAMES
-@spawn begin
+#@spawn begin
             println(db_name)
             @time experiment(db_name,2,3,2,0,false)
             @time experiment(db_name,2,3,2,0,true)
-          end
+#          end
 end
-end
+#end
 end
